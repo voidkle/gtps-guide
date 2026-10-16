@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "gen": "python3 gen.py",
+    "dev": "python3 gen.py && vitepress dev",
+    "build": "python3 gen.py && vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

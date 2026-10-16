@@ -1,0 +1,72 @@
+# 0x0f SEND_LOCK
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="server → client" /> <Badge type="tip" text="confirmed" />
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+A lock was placed (or its area changed). The client puts the lock on its tile, sets its owner, and marks every
+tile the lock covers, using a list of tile indices in the extra data.
+
+| Field | Used as |
+|---|---|
+| `tileX`, `tileY` | the lock's tile |
+| `itemID` | the lock item, set as the foreground |
+| `netID` | the owner's user id, stored in the lock's tile extra |
+| `targetNetID` | how many tile indices follow in the extra data |
+| `flags` | bit 3 (0x08, `S_EXTENDED`) must be set for the extra data |
+
+The foreground and owner are only written when the tile isn't already a lock (tile extra type 3) with the same
+owner, so re-sending a lock just updates its area.
+
+### Extra data
+
+```text
+u16 tile_index[targetNetID]      index = y * width + x
+```
+
+Every tile that pointed at this lock is released first, then each listed tile gets this lock's index as its
+parent and tile flag 0x02 (locked). The indices aren't bounds-checked, and with `targetNetID` > 0 but no
+extra data the client reads through a null pointer: send exactly `targetNetID` valid indices.
+
+### Decompiled handler
+
+```c
+case 0x0f: // SEND_LOCK -> World_HandlePacket (0x15dd790) -> 0x1625a28
+    if (!self->world) break;
+    TileMap *map = &self->world->tilemap;
+    u16 *list = ExtraData(pkt);
+    Tile *lock = GetTile(pkt->tileX, pkt->tileY);
+    if (!lock) break;
+    if (!(lock->extra && lock->extra->type == 3 /* lock */) || lock->extra->owner != pkt->netID) {
+        SetForeground(lock, pkt->itemID, 0, map->world, 0);
+        lock->extra->owner = pkt->netID;                     // extra+0xc
+    }
+    for (Tile *t : map->tiles)                               // release the old area
+        if (t->parent == lock->index) SetParent(t, 0);       // 0x15b5910: parent = 0, flag 0x02 off
+    for (int i = 0; i < pkt->targetNetID; i++)
+        SetParent(&map->tiles[list[i]], lock->index);        // parent = lock, flag 0x02 on
+    break;
+```
+
+<small>Handler: `0x1625a28` (via case 0x0f of `0x1373e20` and `0x15dd790`) in the 5.60 arm64 client; callees read: `0x15b5910`, `0x15b1854`, `0x15d1b80`.</small>
+
+## Header fields used
+
+Offsets are from the [game packet header](/guide/game-packet). Fields not listed are 0.
+
+| Field | Meaning |
+|---|---|
+| `netID` | the owner's user id |
+| `itemID` | the lock |
+| `tileX / tileY` | where it was placed |
+| `flags` | `S_EXTENDED` |
+
+## gurotopia
+
+`include/gamePacket/tile_change.cpp`, after a World Lock is placed.
+
+## Official client
+
+**Received:** handled at `0x1374638` in the incoming switch (`0x1373e20`).

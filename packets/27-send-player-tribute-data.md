@@ -1,0 +1,69 @@
+# 0x27 SEND_PLAYER_TRIBUTE_DATA
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="server → client" /> <Badge type="warning" text="not implemented" />
+
+The 5.60 client has its own handler for this type (`0x13742f0`), so the official server sends it. Neither gurotopia nor GrowServer does yet.
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+The data for the **Player Tribute** screen. The client parses it into the tribute lists, then saves the raw extra
+data to `cache/player_tribute.dat`. If the write fails it creates the `cache` folder and retries up to 100 times.
+If it still can't write, it logs "Error writing %s. Out of storage space?…" and disconnects. The screen titles
+the lists "Epic Players", "Exceptional Mentors", "Charity Champions" and "Grow Pass Leaders".
+
+| Field | Used as |
+|---|---|
+| `extraDataLength` | size of the data written to the cache file |
+
+### Extra data
+
+Strings, each `u16 length` + bytes (no terminator). There are 3 of them, or 4 when the server's `proto` (from
+the login settings string) is above 206:
+
+| # | List |
+|---|---|
+| 1 | Epic Players |
+| 2 | Exceptional Mentors |
+| 3 | Charity Champions |
+| 4 | Grow Pass Leaders (`proto` > 206 only) |
+
+Each string is the text shown under that heading, so presumably a list of names. The order comes from the
+screen-building code at `0x1bcf23c`, which shows the headings in this order.
+
+### Decompiled handler
+
+```c
+case 0x27: // SEND_PLAYER_TRIBUTE_DATA
+    TributeData *t = &GetApp()->tribute;               // app+0xf20  (FUN_0157d818)
+    // FUN_0157d6c0(t, data, proto)
+    uint8_t *data = GetExtraData(pkt);
+    t->clear();
+    t->count = GetApp()->proto > 206 ? 4 : 3;          // FUN_0117e8cc() = app+0xc08
+    int off = 0;
+    for (int i = 0; i < t->count; i++) {
+        uint16_t len = *(uint16_t *)(data + off); off += 2;   // FUN_01e741dc
+        t->text[i].assign(data + off, len);              off += len;
+    }
+
+    std::string path = GetCachePath("player_tribute.dat");   // FUN_01082d80
+    if (!file.open(path, "wb")) {
+        create_dir_recursively(GetAppCacheDir(), "cache");
+        for (int i = 0; i <= 100 && !file.open(path, "wb"); i++);
+        if (!file.is_open()) {
+            LogError("Error writing %s. Out of storage space? Who knows what's going to happen now!", path);
+            Disconnect(GetApp()->net, 0);                 // FUN_011433d4(app+0x9a0, 0)
+            break;
+        }
+    }
+    file.write(GetExtraData(pkt), pkt->extraDataLength);
+    file.close();
+    break;
+```
+
+<small>Handler: inline in the switch at `0x13742f0`; callees read: `0x157d818`, `0x157d6c0`, `0x1e741dc`, `0x17c94f0` (fopen), `0x17c964c` (fwrite). Login code `0x1ba6598` loads `player_tribute.dat` from the cache, and the tribute screen is `0x1bcf23c`.</small>
+
+## Official client
+
+**Received:** handled at `0x13742f0` in the incoming switch (`0x1373e20`).

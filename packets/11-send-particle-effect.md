@@ -1,0 +1,59 @@
+# 0x11 SEND_PARTICLE_EFFECT
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="server → client" /> <Badge type="tip" text="confirmed" />
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+The client turns the packet into a call to its own `OnParticleEffect` function, so this is a compact way to send
+that function without a variant list. The particle id comes from `speedY` when the server's `proto` (from the
+login settings string) is 44 or more, and from `netID` otherwise. The call runs after `itemID` milliseconds.
+
+| Field | Used as |
+|---|---|
+| `netID` | particle id, only when `proto` &lt; 44 |
+| `speedY` | particle id (converted from float), when `proto` ≥ 44 |
+| `posX`, `posY` | where the effect plays, in pixels (argument 1) |
+| `particleID` | float argument 2 of `OnParticleEffect` |
+| `speedX` | float argument 3 of `OnParticleEffect` |
+| `itemID` | delay in milliseconds before the effect runs |
+
+gurotopia's fireworks send `speed = {0xb3, 0x25..0x28}` and `itemID` 0, 200 and 400, so with gurotopia's
+`proto` value the particle ids 0x25-0x28 come from `speedY`.
+
+### Decompiled handler
+
+```c
+case 0x11: // SEND_PARTICLE_EFFECT
+    App *app = GetApp();
+    int particle = app->proto < 44 ? pkt->netID : (int)pkt->speedY;   // app+0xc08 = "proto" from the login settings
+    vec2 pos = { pkt->posX, pkt->posY };
+    // FUN_01377f80: build the argument list and run the function like a server call
+    VariantList args;
+    args[0] = particle;          // int
+    args[1] = pos;               // vec2
+    args[2] = pkt->particleID;   // float (offset 0x28)
+    args[3] = pkt->speedX;       // float
+    CallFunctionDelayed(app->gameRoot /* app+0xfd8 */, /*delayMS*/ pkt->itemID, "OnParticleEffect", args);
+    break;
+```
+
+<small>Handler: inline in the switch at `0x1374008`, then `0x1377f80`; the `proto` value is written by `0x108457c` when the login settings contain `proto`.</small>
+
+## Header fields used
+
+Offsets are from the [game packet header](/guide/game-packet). Fields not listed are 0.
+
+| Field | Meaning |
+|---|---|
+| `pos` | where |
+| `...` | effect parameters |
+
+## gurotopia
+
+`include/database/world.cpp`.
+
+## Official client
+
+**Received:** handled at `0x1374008` in the incoming switch (`0x1373e20`).

@@ -1,0 +1,43 @@
+# action|on_use_door_tutorial
+
+<Badge type="info" text="GENERIC_TEXT (2)" /> <Badge type="info" text="client → server" /> <Badge type="warning" text="not in gurotopia" />
+
+## Format
+
+Exactly as the 5.60 client formats it (`{}` is filled in):
+
+```text
+action|on_use_door_tutorial
+```
+
+## When the client sends it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Tutorial progress: sent when you use a door during the tutorial and the client has no local tutorial
+step for that door.
+
+| Field | Value |
+|---|---|
+| message | message type 2 (GENERIC_TEXT) |
+| text | `action\|on_use_door_tutorial\n` |
+
+- Only while the tutorial is active (`0x1444df4`) and connected. If the current tutorial step lists the door, the
+  client advances the step itself instead; if the step is in its "skip" list nothing is sent.
+- The pause menu's Quit button calls the same function and shows "You must complete the tutorial first!" when it returns false.
+
+<small>Builder: `0x197b92c`; called from `0x13035e4`, `0x17289bc`.</small>
+
+## Server
+
+gurotopia doesn't handle this action yet (`action_pool` in `include/action/__action.cpp`); the server ignores it.
+
+## Send it yourself
+
+With `send_text()` from [Talk to the server](/guide/talk-to-server):
+
+```cpp
+send_text(2, "action|on_use_door_tutorial\n");
+```
+
+<small>Client function: `0x197b92c` in libgrowtopia.so 5.60.</small>

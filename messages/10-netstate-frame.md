@@ -1,0 +1,55 @@
+# 10 NETSTATE_FRAME
+
+<Badge type="info" text="message type" /> <Badge type="tip" text="both" />
+
+Binary "NetState" frames, used only in some worlds (probably PvE / dungeon). The two directions have different bodies. The name is this site's.
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Binary "NetState" frames, used only in worlds with flag 0x200 in world+0x1a0 or bit 0 of the version-27
+trailer int (probably PvE / dungeon worlds). Both directions use type 10, with different bodies.
+
+### Client → server
+
+Sent reliable from the world tick (`0x1380cf8`, run by `OnUpdate`) on every fixed step, and only when
+there's something to send:
+
+| Bytes | Field | Meaning |
+|---|---|---|
+| u32 | tick | a global counter + 250 (probably the client's current tick plus its 250 delay) |
+| u8 n | count | at most 100 |
+| n × 12 bytes | inputs | 6 × u16 each, taken from a list at world+0x117b8 that is then cleared. Probably your inputs since the last send; the fields weren't traced |
+
+### Server → client
+
+| Bytes | Field |
+|---|---|
+| u32 | tick |
+| u8 + n × 12 bytes | list 1 (the same 12-byte entries the client sends) |
+| u8 + n × 8 bytes | list 2 |
+| u8 + n × 1 byte | list 3 |
+| u8 + n × 3 bytes | list 4 |
+| u8 + n × 6 bytes | list 5 |
+| u8 + n × 8 bytes | list 6 |
+
+Each list is a count byte and that many entries (at most 100). The frame goes into a ring buffer
+(`0x1b3d178`). When the buffer is full the client first plays out three quarters of it, list by list.
+What each list holds wasn't traced.
+
+```c
+void SendNetStateInputs(World *w) {                    // 0x1b3eef8
+    if (w->inputs.empty()) return;                     // 0x13491a4
+    bytes b = { u32(g_tick + 250), u8(n), n x 12 bytes };   // 0x184dd00, 0x13481b0
+    SendGamePacket(10, b.data(), b.size(), NULL, GetApp()->net->peer, 1);
+}
+```
+
+<small>Received: case 10 of `0x114276c` → `0x1b3cf54` (parser `0x13482f8`). Sent: `0x1b3eef8`, called from `0x13811bc`.</small>
+
+## Layout
+
+```text
+[u32 10][...]
+```

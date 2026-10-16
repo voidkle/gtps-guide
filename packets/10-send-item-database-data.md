@@ -1,0 +1,78 @@
+# 0x10 SEND_ITEM_DATABASE_DATA
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="server → client" /> <Badge type="tip" text="confirmed" />
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Delivers items.dat. The client loads the item database from the extra data (inflating it first if it's
+compressed), then saves it as `items.dat` in its cache folder so the next login can skip the download.
+
+| Field | Used as |
+|---|---|
+| `itemID` | ≤ 0: the extra data is raw items.dat. > 0: the extra data is zlib-compressed and `itemID` is the uncompressed size |
+| `extraDataLength` | the compressed size (zlib input length); also the number of bytes written when the data is raw |
+
+### Extra data
+
+items.dat, raw or zlib-compressed (zlib 1.2.8 `inflate`). The decompressed buffer is `itemID + 1` bytes with a trailing 0.
+
+### Decompiled handler
+
+```c
+case 0x10: {
+    LogMsg("Get request. Loading items data.");
+    u8 *data;
+    int size;
+    if (pkt->itemID < 1) {
+        data = extra; size = pkt->extraDataLength;
+        ItemInfoManager()->LoadFromMem(data, 1);                       // 0x1563a38
+    } else {
+        data = ZlibInflate(extra, pkt->extraDataLength, pkt->itemID);   // 0x1e731f8
+        size = pkt->itemID;
+        ItemInfoManager()->LoadFromMem(data, 1);
+    }
+    LogMsg("Get request. Loading items data done.");
+    ItemInfoManager()->AfterLoad();                                     // 0x156e7a0
+
+    std::string path = GetSavePath(GetApp(), "items.dat");               // 0x1082d80
+    File f;
+    if (!f.Open(path, "wb")) {
+        CreateDirRecursively(GetAppCacheDir(), "cache");               // via Java
+        for (int i = 0; i <= 100 && !f.Open(path, "wb"); i++) ;
+        if (!f.IsOpen()) {
+            ShowMessage("Error writing %s. Out of storage space? Who knows what's going to happen now!", path);
+            sub_1dc69c8();
+            Client_Reconnect(GetApp()->client, 0);                      // 0x11433d4: drop the ENet peer, log "Disconnected?! Will attempt to reconnect...", run OnReconnect after 2 s
+            break;
+        }
+    }
+    f.Write(data, size);
+    f.Close();
+    EventBus_Post(EventBus(), ...);                                     // 0x1377d84 on 0x1377af4: calls every listener of one event type; which listeners react wasn't traced
+}
+```
+
+<small>Handler: `0x1374248` (switch case) in the 5.60 arm64 client; callees read: `0x11433d4`, `0x1142e20`, `0x1377d84`, `0x1563a38`, `0x1e731f8`, `0x17c94f0`, `0x1420a70`, `0x14230a4`.</small>
+
+## Header fields used
+
+Offsets are from the [game packet header](/guide/game-packet). Fields not listed are 0.
+
+| Field | Meaning |
+|---|---|
+| `flags` | `S_EXTENDED` |
+| `extraDataLength` | size of items.dat |
+
+## Extra data
+
+The raw items.dat.
+
+## gurotopia
+
+Built once by `decode_items()` in `include/database/items.cpp`; sent for `refresh_item_data`.
+
+## Official client
+
+**Received:** handled at `0x1374248` in the incoming switch (`0x1373e20`).

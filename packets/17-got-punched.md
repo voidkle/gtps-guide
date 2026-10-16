@@ -1,0 +1,47 @@
+# 0x17 GOT_PUNCHED
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="client → server" /> <Badge type="warning" text="inferred" />
+
+## What the client sends
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+The client never handles this type; it **sends** it, to tell the server that another player's punch hit you.
+The client doesn't send it for its own punches: it checks the movement packets of other players.
+
+| Field | Value |
+|---|---|
+| `type` | 0x17 |
+| `targetNetID` | the puncher's netID (avatar+0x40) |
+| `itemID` | the index of the punched tile (`x + y × width`, tile+0x56) |
+| everything else | 0 |
+
+Sent reliable, no extra data. gurotopia and GrowServer ignore it.
+
+### When it's sent
+
+When a [STATE (0x00)](./00-state) packet from **another** player arrives with the punch bit (`flags` bit 9,
+0x200) and the tile at its `tileX`, `tileY` overlaps your own avatar (`0x15b1720` against your collision box),
+and:
+
+- the puncher's punch effect (avatar+0x18c) isn't 0x45 (no effect on others) or 0x12 (that one runs its own
+  effect, `0x130e78c`, instead);
+- you're alive (avatar+0x170 bit 0 clear) and not frozen in a door or dialog (avatar+0x128 == 0).
+
+The client then knocks itself back before sending (`0x130f1ec`): away from the puncher, scaled by a physics
+constant, ×0.75 when **you** wear The Fattenator (8498), Shield of Mining (9366), Forged Iron Skin (7948) or
+Sword And Shield (3160), and limited to ±12000, and plays the hit animation. There's no knockback while you
+wear Dancemaster's Crown (6300) in avatar state 13, or when a world tile from `0x15de210` (probably the main
+door) has flag 0x40. If the puncher's punch effect is 0xb1 there's no knockback and no animation. In all these
+cases the packet is still sent.
+
+Both callers are the remote player's movement handler (`0x12dd098` → `0x130e8bc` and `0x12dce5c` →
+`0x130f3b8`).
+
+<small>Sender: `0x130ee8c` (header at `0x130ef70`); knockback `0x130f1ec`.</small>
+
+## Official client
+
+**Received:** ignored (falls to the switch's default).
+
+**Sent:** `0x130efb8` and `0x130f130` set the type to 0x17.

@@ -1,0 +1,181 @@
+# 0x1c BATTLE_EVENT
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="server → client" /> <Badge type="warning" text="not implemented" />
+
+The 5.60 client has its own handler for this type (`0x13742ac`), so the official server sends it. Neither gurotopia nor GrowServer does yet.
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Drives a team battle (capture the flag with Game Flags, or the egg variant with Game Eggs): start and end the battle, change player and team scores, pick up, return, capture or drop a flag/egg, and leave a team. Most events print a line to the console and play a sound. Except for sub-command 7, nothing happens unless a battle was started with sub-command 0 (and the player is in a world).
+
+| Field | Used as |
+|---|---|
+| `tileX` | the sub-command (below) |
+| `tileY` | the value: start options, score change, tile index or flag/egg state, depending on the sub-command |
+| `netID` | the player the event is about |
+| `itemID` | the team (sub-command 3); 1 = "captured" instead of "dropped" (sub-command 5) |
+| `extraDataLength` | must be non-zero to start a battle |
+
+Teams are numbered 0 Red Rabbits, 1 Blue Bombers, 2 Yellow Yaks, 3 Purple Penguins (anything else prints as Spooky Skulls). In the flag/egg state, 0-3 is a team's flag, 4 a neutral Game Flag, 5 a Game Egg and 255 nothing.
+
+### Sub-commands
+`tileX` selects what happens:
+
+| Value | Effect | Fields used |
+|---|---|---|
+| 0 | Start the battle and read the scoreboard from the extra data. Plays `audio/mp3/battle_theme_loop.mp3` unless bit 6 of `tileY` is set; bit 7 of `tileY` turns off all the console messages below. | `tileY`, extra data |
+| 1 | End the battle: every player leaves their team and drops what they carry, and the battle music stops. | |
+| 2 | Add `tileY` to player `netID`'s score: "*name* scored a point!", "scored *n* points!", "lost a point!" or "lost *n* points!". | `netID`, `tileY` |
+| 3 | Add `tileY` to team `itemID`'s score, with the same messages using the team name. | `itemID`, `tileY` |
+| 4 | Player `netID` picks up the flag or egg on tile number `tileY` (y × width + x). A Game Flag (1622) becomes a Missing Game Flag (1624) and a Game Egg (5992) a Missing Game Egg (5994); the player now carries that flag's team. "*name* got the flag!", "got the *team* Flag!" or "got an egg!", and `audio/balloon.wav`. | `netID`, `tileY` |
+| 5 | Flag/egg state change. With `netID` = -1: "The flag was returned!", "An egg was returned!" or "The *team* Flag was returned!". For a player, if `tileY` is their own team they returned it; otherwise they now carry `tileY` (got the flag/egg), or, for 255, dropped it (`itemID` 1: "captured" it). | `netID`, `tileY`, `itemID` |
+| 6 | Player `netID` leaves their team. | `netID` |
+| 7 | Local player only: sets avatar+0x6c to `tileY`, the same field that [OnCountdownStart](/functions/OnCountdownStart)'s second argument sets; `audio/bleep_fail.wav` if it went down, `audio/getpoint.wav` if not. Works without a running battle. | `netID`, `tileY` |
+
+The local player also hears `audio/getpoint.wav` whenever a score goes up (2 and 3) while they are on a team.
+
+### Extra data
+Only sub-command 0 reads it (`sub_14db270`, the scoreboard):
+
+| Type | Meaning |
+|---|---|
+| `u16` length + bytes | the scoreboard title, drawn with a shadow at the top left of the screen (`0x14db4c8`) |
+| `u32` | stored (scoreboard+0x1c) and written back by the serializer, but nothing in the client reads it |
+| `u8` | number of teams |
+| `i32` × number of teams | each team's starting score |
+
+With no teams, the scoreboard shows the top three players instead.
+
+### Decompiled handler
+
+```c
+void BattleEvent(GameLogic *self, packet *pkt)          // 0x1378634
+{
+    if (!self->world) return;
+    int cmd = pkt->tileX;
+
+    if (cmd == 0) goto start;
+    if (cmd == 7) {                                     // works without an active battle
+        NetAvatar *p = GetAvatar(pkt->netID);
+        if (!p || p != self->localPlayer) return;
+        int old = p->countdown; p->countdown = pkt->tileY;  // avatar+0x6c, also set by OnCountdownStart
+        PlaySound(self, center(p), pkt->tileY < old ? "audio/bleep_fail.wav" : "audio/getpoint.wav");
+        return;
+    }
+    if (!self->battleActive) return;                    // self+0x330
+
+    switch (cmd) {
+    case 0: start:
+        if (pkt->extraDataLength == 0) return;
+        self->battleActive = 1;
+        Scoreboard_Read(&self->scoreboard, GetExtra(pkt), &pos, 0);   // self+0x318
+        if (!(pkt->tileY & 0x40))
+            PlayMusic(0x33, "audio/mp3/battle_theme_loop.mp3", 0, 1);
+        self->battleQuiet = (pkt->tileY >> 7) & 1;      // self+0x368: no console messages
+        break;
+
+    case 1:                                             // end
+        for (NetAvatar *p : all players) { p->team = 0xff; p->carried = 0xff; }
+        self->battleActive = 0;
+        GetApp()->gui->field_2f0 = 0;
+        GetAudioManager()->StopMusic();                 // 0x107e1e4, vtable +0x50
+        if (self->renderer) sub_11ba5c0(self->renderer);
+        break;
+
+    case 2: {                                           // player score
+        NetAvatar *p = GetAvatar(pkt->netID); if (!p) return;
+        SetBattleScore(p, p->score + pkt->tileY);       // avatar+0x270, re-sorts the top 3
+        if (!self->battleQuiet) {
+            std::string who = TeamColor(p->team) + p->name;
+            int n = pkt->tileY;
+            if      (n == 1)  Console(who + " scored a point!``");
+            else if (n == -1) Console(who + " lost a point!``");
+            else if (n < -1)  Console(who + " lost " + to_string(-n) + " points!``");
+            else if (n > 1)   Console(who + " scored " + to_string(n) + " points!``");
+        }
+        goto getpoint;
+    }
+    case 3: {                                           // team score
+        self->scoreboard.teamScore[pkt->itemID] += pkt->tileY;   // self+0x33c + team*4
+        if (!self->battleQuiet) {
+            std::string team = TeamName(pkt->itemID, true);
+            int n = pkt->tileY;
+            if      (n == 1)  Console(team + " scored a point!``");
+            else if (n == -1) Console(team + " lost a point!``");
+            else if (n < -1)  Console(team + " lost " + to_string(-n) + " points!``");
+            else if (n > 1)   Console(team + " scored " + to_string(n) + " points!``");
+        }
+    getpoint:
+        if (self->localPlayer && self->localPlayer->team != 0xff && pkt->tileY > 0)
+            PlaySound(self, center(self->localPlayer), "audio/getpoint.wav");
+        break;
+    }
+    case 4: {                                           // pick up a flag/egg
+        Tile *t = GetTileByIndex(&self->world->tilemap, pkt->tileY);   // sub_1625b8c
+        if (!t || !t->extra) return;
+        bool flag = GetFG(t) == 1622;                   // Game Flag
+        if (!flag && GetFG(t) != 5992) return;          // Game Egg
+        uint8_t team = t->extra->team;                  // tile extra +0x60
+        NetAvatar *p = GetAvatar(pkt->netID); if (!p) return;
+        p->carried = team;
+        SetForeground(t, flag ? 1624 : 5994);           // Missing Game Flag / Missing Game Egg
+        if (!self->battleQuiet) {
+            if (!flag)          Console(TeamColor(team) + p->name + " got an egg!``");
+            else if (team == 4) Console(TeamColor(4) + p->name + " got the flag!``");
+            else Console(TeamColor(p->team) + p->name + "`` got the " + TeamName(team, true) + " Flag!");
+        }
+        PlaySound(self, TilePos(t), "audio/balloon.wav");
+        break;
+    }
+    case 5:
+        if (pkt->netID == -1) {                         // returned by the server
+            if (self->battleQuiet) return;
+            if      (pkt->tileY == 5) Console("An egg was returned!``");
+            else if (pkt->tileY == 4) Console("The flag was returned!``");
+            else if (pkt->tileY < 4)  Console("The " + TeamName(pkt->tileY, true) + " Flag was returned!");
+            return;
+        } else {
+            NetAvatar *p = GetAvatar(pkt->netID); if (!p) return;
+            std::string who = TeamColor(p->team) + p->name;
+            if (pkt->tileY == p->team) {                // returned their own team's flag
+                if (!self->battleQuiet) {
+                    if      (p->team == 5) Console(who + " returned an egg!``");
+                    else if (p->team == 4) Console(who + " returned the flag!``");
+                    else                   Console(who + "`` returned the " + TeamName(pkt->tileY, true) + " Flag!");
+                }
+            } else {
+                if (!self->battleQuiet) {
+                    if      (pkt->tileY == 4) Console(who + " got the flag!``");
+                    else if (pkt->tileY == 5) Console(who + " got an egg!``");
+                    else if (pkt->tileY < 4)  Console(who + "`` got the " + TeamName(pkt->tileY, true) + " Flag!");
+                    else {                              // 255: no longer carrying
+                        const char *verb = pkt->itemID == 1 ? "captured" : "dropped";
+                        if      (p->carried == 5) Console(who + " " + verb + " an egg!``");
+                        else if (p->carried == 4) Console(who + " " + verb + " the flag!``");
+                        else Console(who + "`` " + verb + " the " + TeamName(p->carried, true) + " Flag!");
+                    }
+                }
+                p->carried = pkt->tileY;
+            }
+            if (pkt->tileY != 0xff) PlaySound(self, center(p), "audio/balloon.wav");
+        }
+        break;
+
+    case 6: {                                           // leave the team
+        NetAvatar *p = GetAvatar(pkt->netID); if (!p) return;
+        p->team = 0xff; p->carried = 0xff;
+        Scoreboard_Refresh(&self->scoreboard);          // sub_14db3ec
+        break;
+    }
+    }
+}
+// TeamColor(team) (sub_14db1ec): "`4", "`1", "`6", "`#" for teams 0-3, "`b" otherwise.
+```
+
+<small>Handler: `0x1378634` (called from the switch at `0x13742ac`) in the 5.60 arm64 client; callees read: `0x14db270`, `0x1e741dc`, `0x14db3ec`, `0x1313674`, `0x14db034`, `0x14db1ec`, `0x1625b8c`, `0x15aee10`, `0x1381ebc`; scoreboard drawing `0x14db4c8`. `0x107e1e4` returns the audio manager; its vtable +0x50 is the call the settings code makes when you turn music off (`0x11a2a70`), so it stops the music.</small>
+
+## Official client
+
+**Received:** handled at `0x13742ac` in the incoming switch (`0x1373e20`).

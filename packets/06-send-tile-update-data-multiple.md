@@ -1,0 +1,65 @@
+# 0x06 SEND_TILE_UPDATE_DATA_MULTIPLE
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="info" text="server → client" /> <Badge type="warning" text="not implemented" />
+
+The 5.60 client has its own handler for this type (`0x1374680`), so the official server sends it. Neither gurotopia nor GrowServer does yet.
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Several tile updates in one packet: a list of positions, each followed by a tile record in the same format as
+[SEND_TILE_UPDATE_DATA (0x05)](/packets/05-send-tile-update-data). After the last one the client redraws the
+whole world once.
+
+| Field | Used as |
+|---|---|
+| `flags` | bit 3 (0x08, `S_EXTENDED`) must be set, or the client sees no extra data |
+
+### Extra data
+
+```text
+repeat:
+  i32 x
+  if x == -1: end of list
+  i32 y
+  tile record for (x, y)      u16 fg, u16 bg, u16 parent, u16 flags, [u16 lock], [tile extra], [component]
+```
+
+Without `S_EXTENDED` the extra-data pointer is null. The loop then skips the reads, never sees `x = -1` and never ends, so the client freezes. If the leftover x, y happen to name a tile, it reads that tile from the null pointer and crashes instead. There's no count: the list **must** end with `x = -1`. If (x, y) is outside the world the record is **not**
+skipped, so the rest of the list is read from the wrong place. Keep every position inside the world.
+
+### What happens
+
+- Each tile is replaced like in 0x05, without the sounds or neighbour redraws.
+- Fish Tank Port (3002) and Training Port (5530) refresh the renderer's map at their tile.
+- At the end every tile is redrawn and the world renderer is refreshed.
+
+### Decompiled handler
+
+```c
+case 0x06: // SEND_TILE_UPDATE_DATA_MULTIPLE
+    if (!self->world) break;
+    u8 *data = ExtraData(pkt);
+    int offset = 0;
+    for (;;) {
+        int x = *(int *)(data + offset); offset += 4;
+        if (x == -1) break;
+        int y = *(int *)(data + offset); offset += 4;
+        Tile *tile = GetTile(x, y);
+        if (tile) {
+            Tile_Serialize(tile, data, &offset, /*write*/ false, self->world, true, self->world->version);
+            if (GetFG(tile) == 3002 || GetFG(tile) == 5530)   // Fish Tank Port, Training Port
+                RendererMap_Refresh(&self->renderer->map, x, y);
+        }
+    }
+    RefreshAllTiles(&self->world->tilemap);                  // 0x162561c
+    if (self->renderer) RefreshRenderer(self->renderer);
+    break;
+```
+
+<small>Handler: case 0x06 of `0x1373e20` in the 5.60 arm64 client; callees read: `0x15b0b14`, `0x162561c`, `0x1844e18`.</small>
+
+## Official client
+
+**Received:** handled at `0x1374680` in the incoming switch (`0x1373e20`).

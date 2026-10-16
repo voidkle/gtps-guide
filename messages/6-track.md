@@ -1,0 +1,30 @@
+# 6 TRACK
+
+<Badge type="info" text="message type" /> <Badge type="info" text="server → client" />
+
+Analytics: the server asks the client to log an event. The client never sends it. gurotopia only prints "received unqiue" if one arrives.
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+**Server → client.** The client never sends type 6 (no sender of it exists in 5.60). The server uses it to
+make the client report an analytics event. The text is `key|value` lines:
+
+| Key | Meaning |
+|---|---|
+| `eventName` | the event's name. Required: without it the client logs "Bad Track Packet , eventName not defined" |
+| `eventType` | which analytics service gets it (default 0) |
+| any other key | an event parameter. A value starting with `*` names a value the client fills in itself (`*name` is looked up in a table at tracker+0x88; unknown names become `Funcnotfound`) |
+
+`eventType` 0, 1, 2, 6, 7, 8, 11, 12, 13 and 14 go to the UbiServices adapter (`0x1f02088`), 5 to a second
+adapter (`0x1d8d1e4`). Any other value logs "Un supported Tracking type: %d". The parameters are passed on as
+`key|value\n` text. Nothing is shown to the player.
+
+<small>Case 6 of the dispatcher `0x114276c` → `0x13ded38`.</small>
+
+## Layout
+
+```text
+[u32 6][...]
+```

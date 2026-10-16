@@ -1,0 +1,177 @@
+# 0x00 STATE
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="tip" text="both" /> <Badge type="tip" text="confirmed" />
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Moves another player. The client finds the player by `netID` and hands the whole 56-byte header to that
+player's network controller, which stores it as the newest state and smooths the avatar toward it.
+Only remote players have a controller, so a 0x00 about **your own** `netID` is ignored: the server can't
+move you with it (use `OnSetPos` for that).
+
+| Field | Used as |
+|---|---|
+| `type` | must be 0, otherwise the controller logs "Got corrupted packet: %d" and drops it |
+| `netID` | the player to move; ignored if there's no such player in the world, or if it's you |
+| `flags` | bit 2 (`0x04`, gurotopia's `S_UPDATE`) = snap: place the avatar at `posX`/`posY` at once instead of smoothing |
+| everything else | copied as the player's new state (position, speed, facing and animation bits are read later by the avatar code) |
+
+### What the client sends
+
+Your own movement is sent by `0x12e44c8`, which the local player's controller calls every frame. At most
+every 200 ms (`0x1381a2c`; in worlds of type 25 it sends nothing from here), it builds a fresh header with
+`0x130e694` and sends it:
+
+| Field | Value |
+|---|---|
+| `type` | 0 |
+| `netID` | 0 (the server fills it in when it forwards the packet) |
+| `posX`, `posY` | your position in pixels, rounded to whole pixels (`floor(x + 0.5)`) |
+| `speedX`, `speedY` | your current velocity (unscrambled from avatar+0xd8/+0xe4 and +0xe8/+0xf4) |
+| `flags` | state bits (below) |
+| `tileX`, `tileY` | avatar+0xc4/+0xc8, then reset to -1, -1. A tile that one of your actions stored; -1, -1 when nothing happened |
+| `itemID` | avatar+0x164, then reset to 0 |
+| `float_var` | a counter from an app subsystem (`0x1f1a4f0`, reads app+0xc98 +0x70 and clears it); 0 when that subsystem is off |
+| everything else | 0 |
+
+**When it's sent.** The client compares the new header with the last one it sent. It sends when anything
+differs, when `flags` has any of the bits `0x10416740` or bit 23, or when a resend was requested. Otherwise, after
+the movement stops, it sends one last unchanged copy, reliable, and then stays quiet until something changes.
+It also skips sending while avatar+0x18a is set and avatar+0x128 isn't 0, unless avatar flags bit 3 (+0x125) or a
+forced send is pending.
+
+**Reliability.** Normal updates go out unreliable (the last argument of the send function is 0). A pending
+"snap" request (sender+0x8c) sets flag `0x04` (gurotopia's `S_UPDATE`, the bit receivers treat as "place at
+once"), and that packet is sent reliable.
+
+**`flags` bits** come from two places:
+- **From the avatar's state:** `0x10` = facing left (avatar+0x59, set from the sign of the horizontal
+  velocity in `0x1305330`). `0x20` = standing on the ground (avatar+0xd0, set on landing, cleared by jumping).
+  `0x200000` = on the ground with animation state 25 (avatar+0x2858). `0x20000` = avatar+0xd1, recomputed on
+  every landing (`0x12fa850`).
+- **One-shot events:** bits that game code ORs into avatar+0x124 since the last send. They are cleared after
+  each packet. Who sets which:
+
+| Bit | Set by |
+|---|---|
+| `0x40` | the damage functions (`0x130e8bc`, `0x130ed64`, `0x130f4e4`, `0x1310724`, `0x1310c88`, with `audio/burn.wav`/`audio/ouch.wav`); gurotopia reads it as `S_LAVA_HIT` |
+| `0x80` | the movement update `0x130429c` (gurotopia's `S_JUMP`) |
+| `0xc00`, `0x1800` | `0x130f1a4`, `0x130f1ec`. `0x1800` is set when another player's punch knocks you back (`0x130f1ec`, the same event that sends [0x17](./17-got-punched)) |
+| `0x4000` | picking up a dropped object (`0x1381a50`, together with [0x0b](./0b-item-activate-object-request)) |
+| `0x800`, `0x800000` | `0x130e430`, a held-item effect punching a tile (it also sends [0x03](./03-tile-change-request) with the Fist and stores that tile in `tileX`, `tileY`) |
+| `0x8000` | `0x1305d48` |
+| `0x10000` | the damage functions above and `0x130edf0`, `0x1313690` |
+| `0x20000` | `0x1313690` (`audio/ouch.wav`) |
+| `0x40000`, `0x80000` | the movement code `0x130d260`; `0x80000` also from the jump code `0x13045d4` while wearing item 7582 or an item that passes `0x156e590` |
+| `0x100000` | the movement update `0x130429c` |
+| `0x400000` | `0x130db8c` |
+| `0x4000000` | the jump code `0x13045d4`, for jumps with certain worn items |
+| `0x10000000` | `0x130e8bc`, `0x130f4e4` (with `audio/object_collect.wav`) |
+| `0x40000000` | `0x1312570` |
+
+The meaning of most event bits isn't named in the client; the table gives the setter so you can follow one up.
+
+```c
+void LocalController_SendState(Sender *s)          // 0x12e44c8
+{
+    if (WorldTypeIs25()) return;                    // 0x1381838
+    NetAvatar *me = s->avatar;                      // s+0x80
+    if (me->flags125 & 8 || s->forceSend) s->nextSendAt = 0;
+    else if (me->field_18a && me->field_128) return;
+    if (GetTick() <= s->nextSendAt) return;
+    s->nextSendAt = GetTick() + SendInterval();     // 0x1381a2c: 200 ms (100 in type-25 worlds)
+    packet *h = &s->hdr; memset(h, 0, 56);          // type 0
+    FillState(me, h);                               // 0x130e694
+    bool reliable = s->reliableNext;                // s+0x8e
+    if (s->snap) { s->snap = 0; reliable = 1; h->flags |= 0x04; }
+    s->reliableNext = 0;
+    if (memcmp(h, &s->lastSent, 56) || (h->flags & 0x10416740) || (h->flags & 0x800000) || s->forceSend) {
+        s->forceSend = 0; s->lastSent = *h; s->sentIdle = 0; s->lastSendTick = GetTick();
+        SendPacket(4, h, 56, NULL, peer, reliable);
+    } else if (!s->sentIdle) {
+        SendPacket(4, h, 56, NULL, peer, 1);        // one reliable copy once you stop
+        s->sentIdle = 1;
+    }
+}
+
+void FillState(NetAvatar *a, packet *h)             // 0x130e694
+{
+    h->posX = floorf(a->x + 0.5f);  h->posY = floorf(a->y + 0.5f);
+    h->speedX = a->velX;  h->speedY = a->velY;
+    if (a->facingLeft) h->flags |= 0x10;
+    if (a->onGround)   h->flags = (h->flags & ~0x200020) | 0x20 | (a->animState == 25 ? 0x200000 : 0);
+    if (a->field_d1)   h->flags |= 0x20000;
+    h->flags |= a->eventFlags;  a->eventFlags = 0;  // avatar+0x124
+    h->tileX = a->actionTileX;  h->tileY = a->actionTileY;  a->actionTileX = a->actionTileY = -1;
+    h->itemID = a->field_164;   a->field_164 = 0;
+    h->float_var = (float)Subsystem_TakeCounter();  // 0x1f1a4f0
+}
+```
+
+### Decompiled handler
+
+```c
+case 0x00: {
+    NetAvatar *p = GetAvatar(pkt->netID);
+    if (!p) break;
+    p->vtable->OnPacket(p, pkt);              // NetAvatar vtable +0x30 = 0x130e684
+}
+
+void NetAvatar_OnPacket(NetAvatar *p, packet *pkt)   // 0x130e684
+{
+    if (p->controller)                         // avatar+0x110, null for the local player
+        RemoteController_OnPacket(p->controller, pkt);
+}
+
+void RemoteController_OnPacket(Controller *c, packet *pkt)   // 0x12dd098
+{
+    c->receivedAt = GetApp()->tick;
+    if (pkt->type != 0) { LogMsg("Got corrupted packet: %d"); return; }
+    c->state = *pkt;                           // all 56 header bytes
+    c->stateTime = GetApp()->tick;
+    sub_1373ae4();
+    if (sub_1380bb0())                         // a world-state check (calls 0x15e7c94 on the world)
+        return;
+    if (pkt->flags & 0x04) {                   // snap
+        c->previous = c->state;
+        c->state.flags |= 0x04;
+        c->avatar->pos = pkt->pos;
+    } else {
+        sub_130e694(c->avatar, &c->previous);  // start smoothing from the previous state
+        c->previous.flags = c->state.flags;
+        c->previous.tile  = c->state.tile;     // tileX/tileY
+    }
+    c->dirty = 0;
+}
+```
+
+<small>Handler: `0x1373ec0` (switch case) → `0x130e684` → `0x12dd098` in the 5.60 arm64 client; callees read: `0x130e684`, `0x12dd098`. Sender: `0x12e44c8` → `0x130e694`, `0x1381a2c`, `0x1381838`.</small>
+
+## Header fields used
+
+Offsets are from the [game packet header](/guide/game-packet). Fields not listed are 0.
+
+| Field | Meaning |
+|---|---|
+| `netID` | who moved (set by the server when it re-broadcasts) |
+| `flags` | `S_MOVE_LEFT` / `S_MOVE_RIGHT` (facing), `S_JUMP`, `S_LAVA_HIT`... |
+| `pos` | position in pixels (tile × 32) |
+| `speed` | velocity |
+
+## gurotopia
+
+`include/gamePacket/movement.cpp`: stores your position and facing, takes damage on `S_LAVA_HIT`, then re-broadcasts the packet to the world with your `netID`.
+
+## Official client
+
+**Received:** handled at `0x1373ec0` in the incoming switch (`0x1373e20`).
+
+## Send it yourself
+
+Using `compress_state()` from `include/database/peer.cpp` (as `client/main.cpp` does):
+
+```cpp
+send_packet(gamePacket{ .type = 0x00, .netid = my_netid, .state = 0x20 /*S_MOVE_RIGHT*/, .pos = {22 * 32.0f, 36 * 32.0f} });
+```

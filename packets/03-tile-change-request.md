@@ -1,0 +1,185 @@
+# 0x03 TILE_CHANGE_REQUEST
+
+<Badge type="info" text="GAME_PACKET (4)" /> <Badge type="tip" text="both" /> <Badge type="tip" text="confirmed" />
+
+## What the client does with it
+
+<Badge type="tip" text="decompiled from the 5.60 client" />
+
+Player `netID` changed the tile at (`tileX`, `tileY`) with item `itemID`. The client applies it to its own copy of
+the world, plays the matching animation and sound, and, if it was you, takes the item out of your inventory.
+
+| Field | Used as |
+|---|---|
+| `netID` | the player who did it (-1 = nobody: no animation, no inventory change) |
+| `tileX`, `tileY` | the tile |
+| `itemID` | the item used. An item of action type 0 (Fist, 18) breaks the tile; anything else is placed |
+| `jumpCount` | for a placed seed: 1 sets tile flag 0x08 on the new tree, anything else clears it |
+| `buildRange` | for a placed seed: stored in the tree data as its fruit count |
+| `particleID` | must be 0 for the client to remove the placed item from your inventory itself |
+| `flags` | bit 4 (0x10): for items with the "flippable" item flag, the tile is placed flipped (tile flag 0x20) |
+
+### What happens
+
+- **Breaking** (`itemID`'s action type is 0): player `netID` plays its punch animation. The foreground is removed
+  (or the background, if there's no foreground). If something was actually removed, the client plays a break sound
+  chosen by the removed item's material: `audio/metal_destroy.wav`, `audio/rock_destroy.wav`,
+  `audio/punch_glass.wav` or `audio/wood_break.wav`.
+- **Placing**: background items (action types 18, 22, 23, 28) become the background, a seed (type 19) is planted
+  only on an empty foreground, anything else becomes the foreground. Sound: `audio/tree_plant.wav` for a seed (or a
+  MAGPLANT 5000 Remote holding a seed), otherwise `audio/tile_created.wav`.
+- **Your inventory**: when `netID` is you, `particleID` is 0 and the item has its flag at item+0x118 set, the client
+  removes one `itemID` from your inventory. If that was the last one it re-selects your fist or wrench, resets the
+  `LevelTouch` input and redraws the inventory. A server that already sends
+  [MODIFY_ITEM_INVENTORY (0x0d)](/packets/0d-modify-item-inventory) can set `particleID` to stop a double removal.
+- The tile and its 8 neighbours are redrawn. Robots (item type 113) are registered, and placing or removing
+  Vending Hub - Checkout Counter (9270) or Extractor Dynamo (6142) refreshes the world renderer.
+
+### Decompiled handler
+
+```c
+case 0x03: // TILE_CHANGE_REQUEST
+    if (!self->world) break;
+    Avatar *who = pkt->netID == -1 ? NULL : GetAvatar(pkt->netID);
+    Tile *tile = GetTile(pkt->tileX, pkt->tileY);
+    ItemInfo *item = GetItem(pkt->itemID);
+    if (!item) break;
+
+    if (item->type == 0 /* fist: break */) {
+        if (who) sub_10db78c(&who->anim, tile);            // punch animation
+    } else if (who && who == self->localPlayer && item->flag_118 && pkt->particleID == 0.0f
+               && RemoveItem(&self->inventory, item->id, 1) == 0 /* none left */) {
+        int held = gameRoot->selectedItem;                  // short at root+0x240
+        SelectItem(self, held == 32 /* wrench */ && wrenchLocked ? 18 /* fist */ : held);
+        ResetTouch("LevelTouch");
+        sub_13962f4(0);
+        RefreshInventoryUI();
+    }
+
+    if (tile) {
+        u16 fgBefore = GetFG(tile), bgBefore = tile->bg;
+        if (World_HandlePacket(self->world, pkt)) {         // 0x15dd790, see below
+            if (item->type == 0) {                          // something broke: sound by the removed item's material
+                ItemInfo *gone;
+                if (tile->bg != bgBefore)          gone = items[bgBefore];
+                else if (GetFG(tile) != fgBefore)  gone = items[fgBefore];
+                else goto done;                             // nothing changed: no sound
+                const char *s = gone->material == 3 ? "audio/metal_destroy.wav"
+                              : gone->material == 2 ? "audio/rock_destroy.wav"
+                              : gone->material == 1 ? "audio/punch_glass.wav" : "audio/wood_break.wav";
+                PlaySound(self, TileCenter(tile), s);
+            } else {
+                bool seed = item->type == 19 || (item->type == 112 /* MAGPLANT remote */
+                                                 && items[gameRoot->remoteItem]->type == 19);
+                PlaySound(self, TileCenter(tile), seed ? "audio/tree_plant.wav" : "audio/tile_created.wav");
+            }
+        }
+    done:
+        if (self->renderer && (IsSpecial(GetFG(GetTile(pkt->tileX, pkt->tileY))) || IsSpecial(fgBefore)))
+            RefreshRenderer(self->renderer);                // IsSpecial: 9270 or 6142
+    }
+    break;
+
+// World_HandlePacket (0x15dd790), type 3:
+    World_PlaceItem(world, pkt->tileX, pkt->tileY, pkt->itemID);  // 0x1621f94
+    item = GetItem(pkt->itemID); tile = GetTile(pkt->tileX, pkt->tileY);
+    if (!item || !tile) return false;
+    if (!(item->type in {18, 22, 23, 28}) && tile->extra && tile->extra->type == 4 /* tree */) {
+        pkt->jumpCount == 1 ? SetFlag(tile, 0x08) : ClearFlag(tile, 0x08);
+        SetFlag(tile, 0x10);
+        tile->extra->fruit = pkt->buildRange;               // extra+0x60
+    }
+    if (item->flags & 1 /* flippable */)
+        (pkt->flags & 0x10) ? SetFlag(tile, 0x20) : ClearFlag(tile, 0x20);
+    RefreshTile(world, pkt->tileX, pkt->tileY);
+    return true;
+
+// World_PlaceItem (0x1621f94)
+    if (item->type in {18, 22, 23, 28}) { SetBackground(tile, id); refresh the 3x3 around it; }
+    else if (item->type == 0 /* fist */) {
+        if (GetFG(tile)) { SetForeground(tile, 0); unregister robot if it was one (type 113); }
+        else if (tile->bg) SetBackground(tile, 0);
+    }
+    else if (item->type == 19 /* seed */) { if (tile->fg == 0) PlantSeed(tile, item); }
+    else {
+        SetForeground(tile, id);
+        if (id == 4712) SetFlag(tile, 0x40);                // Angry Adventure Gorilla
+        if (item->type == 113) RegisterRobot(tile);
+    }
+```
+
+<small>Handler: case 0x03 of `0x1373e20` in the 5.60 arm64 client; callees read: `0x15dd790`, `0x1621f94`, `0x1595cb8`, `0x1376fe8`, `0x137707c`, `0x13a8350`.</small>
+
+
+
+### What the client sends
+
+The client sends 0x03 to punch, build, plant or use an item on a tile. Every send goes through one helper
+(`0x1381530`), which fills the header the same way:
+
+| Field | Value |
+|---|---|
+| `type` | 0x03 |
+| `itemID` | the item used: 18 (Fist) for punching, otherwise your selected item (GameLogic+0x298) |
+| `tileX`, `tileY` | the target tile |
+| `posX`, `posY` | your avatar's position in pixels (avatar+8) |
+| `flags` | 0x10 when your avatar faces left (avatar+0x59), else 0 |
+| everything else | 0 (`float_var` would carry an extra value only with `proto` ≥ 999999, and no caller passes one) |
+
+Sent reliable, no extra data. Nothing is sent without a local avatar. In offline mode (GameLogic+0xc4) the client
+applies the change to its own world instead of sending it.
+
+When it's sent:
+
+- **Tapping or holding a tile** (`0x13a70f8`) with your selected item, after these checks:
+  - no menu is open, you aren't frozen ("`` `!(Can't, you are frozen!)`` ``"), and you aren't wearing the
+    Present Goblin Disguise (4260);
+  - the tile is in range (`0x1312570`); with a non-Fist item the same tile isn't sent twice in a row while you
+    hold (GameLogic+0x88 remembers the last tile index);
+  - items of action type 37, 64 or 129 only target a Golden Ticket Booth, Display Block, DNA Extractor,
+    Giant Pot O' Gold, Stuff-4-Toys Box, Food Grinder or a tile of action type 98;
+  - consumables in a world that doesn't allow them show "(Not allowed to use consumables here!)" with
+    `audio/cant_place_tile.wav`; a seed needs ground ("(Can't plant a tree in the air!)");
+  - punching (Fist) an empty tile is only sent if another player stands there (so you can punch players);
+    punching a non-empty tile waits for the avatar's punch cooldown and starts the client's
+    "waiting for the server" timer (see [0x16](./16-ping-request#what-the-client-sends));
+  - holding a Flamethrower or T-Shirt Cannon, or a Neutron Gun / Neutron Power Glove without the Neutron Pack,
+    stops Fist punches from being sent.
+- **The punch key** (keyboard/gamepad, `0x13129e0` and `0x1312068` from the input code `0x13354e0`): punches the
+  tile in front of you with `itemID` 18, or enters the door you stand on (that sends [0x07](./07-tile-activate-request)).
+- **Driving over tiles with a farming vehicle** (`0x13002b4`, every frame): with a Doom Plow or Chicken Plow
+  worn, an empty tile you pass gets your selected seed (`itemID` = the seed); passing a tree of another seed
+  that isn't grown yet sends the seed too (splicing). With a Dear John Tractor, Harvester, Harvester Of Sorrows,
+  Zamgrowni or Pineapple Plough, a grown tree you pass is harvested (`itemID` 18).
+- **A held-item effect** (`0x10a2a00` → `0x130e430`) punches its target tile with `itemID` 18 when its animation
+  finishes (probably a charged-punch item; the item wasn't identified).
+
+<small>Sender: `0x1381530`; callers `0x13a70f8`, `0x13129e0`, `0x1312068`, `0x13002b4`, `0x130e430`.</small>
+
+## Header fields used
+
+Offsets are from the [game packet header](/guide/game-packet). Fields not listed are 0.
+
+| Field | Meaning |
+|---|---|
+| `itemID` | 18 = punch, 32 = wrench, anything else = the item to place |
+| `pos` | your position in pixels |
+| `tileX / tileY` | the tile |
+
+## gurotopia
+
+`include/gamePacket/tile_change.cpp`. Punching sends `TILE_APPLY_DAMAGE` (0x08) until the block breaks; then this packet comes back with `itemID` 18. Placing echoes this packet with the placed item. Doors, signs, locks and seeds also get a `SEND_TILE_UPDATE_DATA` (0x05).
+
+## Official client
+
+**Received:** handled at `0x1374588` in the incoming switch (`0x1373e20`).
+
+**Sent:** helper `0x1381530` (7 callers) fills `itemID` and the tile from the player's selected tile.
+
+## Send it yourself
+
+Using `compress_state()` from `include/database/peer.cpp` (as `client/main.cpp` does):
+
+```cpp
+send_packet(gamePacket{ .type = 0x03, .netid = my_netid, .id = 18 /*fist*/, .pos = my_pos, .punch = {25, 37} });
+```
