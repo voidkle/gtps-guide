@@ -1,7 +1,5 @@
 name: Deploy the guide to GitHub Pages
-on:
-  push:
-    branches: [main]
+on:   # automatic runs are off while the account can't run Actions; use scripts/deploy-branch.sh instead
   workflow_dispatch:
 permissions:
   contents: read
