@@ -4,6 +4,7 @@ import sidebar from './sidebar.json' // @note written by docs/gen.py
 export default defineConfig({
   title: 'GTPS Protocol',
   description: 'Growtopia client ↔ server packets, documented from gurotopia, GrowServer and the 5.60 client',
+  base: process.env.BASE || '/', // the Pages workflow sets BASE=/gtps-guide/
   cleanUrls: true,
   srcExclude: ['rx/**', 'rf/**', 'ra/**', 'rm/**'], // @note write-ups that gen.py pastes into the packet, function and action pages
   themeConfig: {
